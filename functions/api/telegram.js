@@ -42,9 +42,9 @@ export async function onRequestPost({ request, env }) {
     const id = cb.data.slice(4);
     const raw = await env.MUSIC_KV.get(key);
     const favs = raw ? JSON.parse(raw) : [];
-    const track = (await env.MUSIC_KV.get("track:" + id, "json"));
+    const track = await env.MUSIC_KV.get("track:" + id, "json");
     if (!track) {
-      await api(env.TELEGRAM_BOT_TOKEN, "answerCallbackQuery", { callback_query_id: cb.id, text: "اول با /search آهنگ پیدا کن." });
+      await api(env.TELEGRAM_BOT_TOKEN, "answerCallbackQuery", { callback_query_id: cb.id, text: "اول یک آهنگ جست‌وجو کن." });
       return new Response("ok");
     }
     const i = favs.findIndex(t => t.id === id);
@@ -53,34 +53,41 @@ export async function onRequestPost({ request, env }) {
     await api(env.TELEGRAM_BOT_TOKEN, "answerCallbackQuery", { callback_query_id: cb.id, text: i >= 0 ? "از پلی‌لیست حذف شد" : "به پلی‌لیست اضافه شد ⭐" });
     return new Response("ok");
   }
-  const text = msg?.text || "";
-  if (text.startsWith("/start")) {
-    await send(env.TELEGRAM_BOT_TOKEN, chatId, "🎵 <b>موزیک من</b>\n\n/search نام آهنگ — جست‌وجوی موسیقی\n/favorites — پلی‌لیست ستاره‌دار من\n/help — راهنما\n\nجست‌وجو فعلاً از کاتالوگ iTunes انجام می‌شود.");
-  } else if (text.startsWith("/help")) {
-    await send(env.TELEGRAM_BOT_TOKEN, chatId, "برای جست‌وجو بنویس:\n<code>/search نام خواننده یا آهنگ</code>\n\nبرای دیدن موارد ستاره‌دار: /favorites");
-  } else if (text.startsWith("/favorites")) {
+  const text = (msg?.text || "").trim();
+  const command = text.match(/^\/(start|help|favorites)(?:@\w+)?(?:\s|$)/i);
+  const searchCommand = text.match(/^\/search(?:@\w+)?(?:\s+([\s\S]*))?$/i);
+  if (command?.[1]?.toLowerCase() === "start") {
+    await send(env.TELEGRAM_BOT_TOKEN, chatId, "🎵 <b>موزیک من</b>\n\nاسم آهنگ یا خواننده را مستقیم بفرست تا جست‌وجو کنم.\n/search نام آهنگ — جست‌وجوی موسیقی\n/favorites — پلی‌لیست ستاره‌دار من\n/help — راهنما\n\nجست‌وجو فعلاً از کاتالوگ iTunes انجام می‌شود؛ جست‌وجوی تکه‌ای از متن ترانه هنوز پشتیبانی نمی‌شود.");
+  } else if (command?.[1]?.toLowerCase() === "help") {
+    await send(env.TELEGRAM_BOT_TOKEN, chatId, "اسم آهنگ یا خواننده را مستقیم بفرست، یا بنویس:\n<code>/search نام خواننده یا آهنگ</code>\n\nبرای دیدن موارد ستاره‌دار: /favorites");
+  } else if (command?.[1]?.toLowerCase() === "favorites") {
     const favs = await env.MUSIC_KV.get(key, "json") || [];
-    if (!favs.length) await send(env.TELEGRAM_BOT_TOKEN, chatId, "پلی‌لیستت فعلاً خالی است. با /search شروع کن.");
+    if (!favs.length) await send(env.TELEGRAM_BOT_TOKEN, chatId, "پلی‌لیستت فعلاً خالی است. اسم یک آهنگ را بفرست تا جست‌وجو کنیم.");
     else {
       const lines = favs.slice(0, 40).map((t, i) => `${i + 1}. <a href="${esc(t.url)}">${esc(t.title)}</a> — ${esc(t.artist)}`).join("\n");
       await send(env.TELEGRAM_BOT_TOKEN, chatId, "⭐ <b>پلی‌لیست من</b>\n\n" + lines);
     }
-  } else if (text.startsWith("/search ")) {
-    const q = text.slice(8).trim();
-    if (!q) { await send(env.TELEGRAM_BOT_TOKEN, chatId, "بعد از /search نام آهنگ یا خواننده را بنویس."); return new Response("ok"); }
+  } else if (searchCommand || (text && !text.startsWith("/"))) {
+    const q = searchCommand ? (searchCommand[1] || "").trim() : text;
+    if (!q) {
+      await send(env.TELEGRAM_BOT_TOKEN, chatId, "بعد از /search نام آهنگ یا خواننده را بنویس.");
+      return new Response("ok");
+    }
     try {
       const tracks = await searchSongs(q);
-      if (!tracks.length) await send(env.TELEGRAM_BOT_TOKEN, chatId, "نتیجه‌ای پیدا نشد. عبارت دیگری امتحان کن.");
+      if (!tracks.length) {
+        await send(env.TELEGRAM_BOT_TOKEN, chatId, "نتیجه‌ای پیدا نشد. نام خواننده یا آهنگ دیگری امتحان کن.");
+      }
       for (const t of tracks.slice(0, 8)) {
         await env.MUSIC_KV.put("track:" + t.id, JSON.stringify(t), { expirationTtl: 86400 });
-        await send(env.TELEGRAM_BOT_TOKEN, chatId, `🎵 <b>${esc(t.title)}</b>\n${esc(t.artist)}\n${t.album ? esc(t.album) + "\n" : ""}${t.url ? '<a href="' + esc(t.url) + '">بازکردن منبع</a>' : ""}`,
+        await send(env.TELEGRAM_BOT_TOKEN, chatId, `🎵 <b>${esc(t.title)}</b>\n${esc(t.artist)}\n${t.album ? esc(t.album) + "\n" : ""}${t.preview ? '<a href="' + esc(t.preview) + '">پیش‌نمایش صوتی</a> · ' : ""}${t.url ? '<a href="' + esc(t.url) + '">بازکردن منبع</a>' : ""}`,
           { reply_markup: { inline_keyboard: [[{ text: "⭐ افزودن/حذف از پلی‌لیست", callback_data: "fav:" + t.id }]] } });
       }
     } catch {
       await send(env.TELEGRAM_BOT_TOKEN, chatId, "فعلاً جست‌وجو در دسترس نیست؛ کمی بعد دوباره امتحان کن.");
     }
   } else {
-    await send(env.TELEGRAM_BOT_TOKEN, chatId, "برای شروع /start را بزن یا از /search نام آهنگ استفاده کن.");
+    await send(env.TELEGRAM_BOT_TOKEN, chatId, "برای شروع /start را بزن یا اسم آهنگ را مستقیم بفرست.");
   }
   return new Response("ok");
 }
