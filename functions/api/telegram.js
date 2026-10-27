@@ -9,14 +9,34 @@ async function send(token, chat_id, text, extra = {}) {
   return api(token, "sendMessage", { chat_id, text, parse_mode: "HTML", disable_web_page_preview: true, ...extra });
 }
 async function searchSongs(q) {
-  const url = "https://itunes.apple.com/search?entity=song&limit=8&term=" + encodeURIComponent(q);
-  const res = await fetch(url);
-  if (!res.ok) throw new Error("Music search failed");
-  const data = await res.json();
-  return (data.results || []).map(x => ({
-    id: String(x.trackId), title: x.trackName || "بدون عنوان", artist: x.artistName || "نامشخص",
-    album: x.collectionName || "", cover: x.artworkUrl100 || "", preview: x.previewUrl || "", url: x.trackViewUrl || ""
-  }));
+  // Try iTunes first, then Deezer as a fallback if the first provider is unavailable.
+  try {
+    const url = "https://itunes.apple.com/search?entity=song&limit=8&term=" + encodeURIComponent(q);
+    const res = await fetch(url, { headers: { "accept": "application/json" } });
+    if (res.ok) {
+      const data = await res.json();
+      const tracks = (data.results || []).map(x => ({
+        id: String(x.trackId), title: x.trackName || "بدون عنوان", artist: x.artistName || "نامشخص",
+        album: x.collectionName || "", cover: x.artworkUrl100 || "", preview: x.previewUrl || "", url: x.trackViewUrl || ""
+      }));
+      if (tracks.length) return tracks;
+    }
+  } catch (err) {
+    console.error("iTunes search failed", err);
+  }
+  try {
+    const url = "https://api.deezer.com/search/track?q=" + encodeURIComponent(q);
+    const res = await fetch(url, { headers: { "accept": "application/json" } });
+    if (!res.ok) throw new Error("Deezer search failed: " + res.status);
+    const data = await res.json();
+    return (data.data || []).slice(0, 8).map(x => ({
+      id: "dz" + String(x.id), title: x.title || "بدون عنوان", artist: x.artist?.name || "نامشخص",
+      album: x.album?.title || "", cover: x.album?.cover_medium || "", preview: x.preview || "", url: x.link || ""
+    }));
+  } catch (err) {
+    console.error("Deezer search failed", err);
+    throw new Error("All music providers failed");
+  }
 }
 export async function onRequestPost({ request, env }) {
   if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_WEBHOOK_SECRET || !env.MUSIC_KV) {
@@ -60,13 +80,17 @@ export async function onRequestPost({ request, env }) {
     await send(env.TELEGRAM_BOT_TOKEN, chatId, "🎵 <b>موزیک من</b>\n\nاسم آهنگ یا خواننده را مستقیم بفرست تا جست‌وجو کنم.\n/search نام آهنگ — جست‌وجوی موسیقی\n/favorites — پلی‌لیست ستاره‌دار من\n/help — راهنما\n\nجست‌وجو فعلاً از کاتالوگ iTunes انجام می‌شود؛ جست‌وجوی تکه‌ای از متن ترانه هنوز پشتیبانی نمی‌شود.");
   } else if (command?.[1]?.toLowerCase() === "help") {
     await send(env.TELEGRAM_BOT_TOKEN, chatId, "اسم آهنگ یا خواننده را مستقیم بفرست، یا بنویس:\n<code>/search نام خواننده یا آهنگ</code>\n\nبرای دیدن موارد ستاره‌دار: /favorites");
-  } else if (command?.[1]?.toLowerCase() === "favorites") {
+  } else if (command?.[1]?.toLowerCase() === "favorites" || text === "⭐ پلی‌لیست من") {
     const favs = await env.MUSIC_KV.get(key, "json") || [];
     if (!favs.length) await send(env.TELEGRAM_BOT_TOKEN, chatId, "پلی‌لیستت فعلاً خالی است. اسم یک آهنگ را بفرست تا جست‌وجو کنیم.");
     else {
       const lines = favs.slice(0, 40).map((t, i) => `${i + 1}. <a href="${esc(t.url)}">${esc(t.title)}</a> — ${esc(t.artist)}`).join("\n");
       await send(env.TELEGRAM_BOT_TOKEN, chatId, "⭐ <b>پلی‌لیست من</b>\n\n" + lines);
     }
+  } else if (text === "ℹ️ راهنما") {
+    await send(env.TELEGRAM_BOT_TOKEN, chatId, "اسم آهنگ یا خواننده را مستقیم بفرست. برای جست‌وجوی دستی هم می‌توانی بنویسی: /search نام آهنگ");
+  } else if (text === "🔎 جستجوی آهنگ") {
+    await send(env.TELEGRAM_BOT_TOKEN, chatId, "اسم آهنگ، خواننده یا عبارتی که یادت مانده را بفرست تا جست‌وجو کنم.");
   } else if (searchCommand || (text && !text.startsWith("/"))) {
     const q = searchCommand ? (searchCommand[1] || "").trim() : text;
     if (!q) {
@@ -83,8 +107,9 @@ export async function onRequestPost({ request, env }) {
         await send(env.TELEGRAM_BOT_TOKEN, chatId, `🎵 <b>${esc(t.title)}</b>\n${esc(t.artist)}\n${t.album ? esc(t.album) + "\n" : ""}${t.preview ? '<a href="' + esc(t.preview) + '">پیش‌نمایش صوتی</a> · ' : ""}${t.url ? '<a href="' + esc(t.url) + '">بازکردن منبع</a>' : ""}`,
           { reply_markup: { inline_keyboard: [[{ text: "⭐ افزودن/حذف از پلی‌لیست", callback_data: "fav:" + t.id }]] } });
       }
-    } catch {
-      await send(env.TELEGRAM_BOT_TOKEN, chatId, "فعلاً جست‌وجو در دسترس نیست؛ کمی بعد دوباره امتحان کن.");
+    } catch (err) {
+      console.error("Telegram music search error", err);
+      await send(env.TELEGRAM_BOT_TOKEN, chatId, "جست‌وجو فعلاً به سرویس‌های موسیقی وصل نمی‌شود. چند لحظه بعد دوباره امتحان کن؛ اگر تکرار شد باید لاگ‌های Cloudflare را بررسی کنیم.");
     }
   } else {
     await send(env.TELEGRAM_BOT_TOKEN, chatId, "برای شروع /start را بزن یا اسم آهنگ را مستقیم بفرست.");
